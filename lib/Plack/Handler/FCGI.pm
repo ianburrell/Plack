@@ -18,11 +18,9 @@ sub new {
     $self->{keep_stderr} ||= 0;
     $self->{nointr}      ||= 0;
     $self->{daemonize}   ||= $self->{detach}; # compatibility
-    $self->{nproc}       ||= 1 unless blessed $self->{manager};
     $self->{pid}         ||= $self->{pidfile}; # compatibility
     $self->{listen}      ||= [ ":$self->{port}" ] if $self->{port}; # compatibility
     $self->{backlog}     ||= 100;
-    $self->{manager}     = 'FCGI::ProcManager' unless exists $self->{manager};
 
     $self;
 }
@@ -72,34 +70,14 @@ sub run {
     if ($self->{listen} or $running_on_server_starter) {
         $self->daemon_fork if $self->{daemonize};
 
-        if ($self->{manager}) {
-            if (blessed $self->{manager}) {
-                for (qw(nproc pid proc_title)) {
-                    die "Don't use '$_' when passing in a 'manager' object"
-                        if $self->{$_};
-                }
-                $proc_manager = $self->{manager};
-            } else {
-                Plack::Util::load_class($self->{manager});
-                $proc_manager = $self->{manager}->new({
-                    n_processes => $self->{nproc},
-                    pid_fname   => $self->{pid},
-                    (exists $self->{proc_title}
-                         ? (pm_title => $self->{proc_title}) : ()),
-                });
-            }
+        $proc_manager = $self->_create_proc_manager('FCGI::ProcManager', 1);
 
-            # detach *before* the ProcManager inits
-            $self->daemon_detach if $self->{daemonize};
-        }
-        elsif ($self->{daemonize}) {
-            $self->daemon_detach;
-        }
-    } elsif (blessed $self->{manager}) {
-        $proc_manager = $self->{manager};
+        $self->daemon_detach if $self->{daemonize};
+    } elsif (exists $self->{manager}) {
+        $proc_manager = $self->_create_proc_manager();
     }
 
-    $proc_manager && $proc_manager->pm_manage;
+    $proc_manager && $proc_manager->pm_manage();
 
     while ($request->Accept >= 0) {
         $proc_manager && $proc_manager->pm_pre_dispatch;
@@ -165,6 +143,32 @@ sub run {
         if ($proc_manager && $env->{'psgix.harakiri.commit'}) {
             $proc_manager->pm_exit("safe exit with harakiri");
         }
+    }
+}
+
+sub _create_proc_manager {
+    my ($self, $default_manager, $default_nproc) = @_;
+
+    my $manager = exists $self->{manager}
+        ? $self->{manager}
+        : $default_manager;
+
+    return unless defined $manager;
+
+    if (blessed $manager) {
+        for (qw(nproc pid proc_title)) {
+            die "Don't use '$_' when passing in a 'manager' object"
+            if $self->{$_};
+        }
+        return $manager;
+    } else {
+        Plack::Util::load_class($manager);
+        return $manager->new({
+            n_processes => defined $self->{nproc} ? $self->{nproc} : $default_nproc,
+            pid_fname   => $self->{pid},
+            (exists $self->{proc_title}
+             ? (pm_title => $self->{proc_title}) : ()),
+        });
     }
 }
 
